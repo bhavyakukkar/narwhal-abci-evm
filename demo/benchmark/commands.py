@@ -4,7 +4,7 @@ import os
 
 from benchmark.utils import PathMaker
 
-NODE = "./../target/debug/node"
+NODE = "./../target/release/node"
 
 
 class CommandMaker:
@@ -71,11 +71,11 @@ class CommandMaker:
         if os.getenv('TMUX'):
             # running within tmux (Georgios' config)
             # kill all other sessions
-            return "tmux kill-session -a"
+            return 'tmux ls | grep -o -e "worker-[0-9]-[0-9]" -e "\(app\|primary\)-[0123]" | xargs -I % sh -c "tmux kill-session -t %"'
         else:
             # running without tmux (Joachim's config)
             # This does not work when running in Tmux
-            return 'tmux kill-server'
+            return 'tmux ls | grep -o -e "worker-[0-9]-[0-9]" -e "\(app\|primary\)-[0123]" | xargs -I % sh -c "tmux kill-session -t %"'
 
     @staticmethod
     def alias_binaries(origin):

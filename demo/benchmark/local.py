@@ -34,8 +34,8 @@ class LocalBench:
 
     def _kill_nodes(self):
         # try:
-        cmd = CommandMaker.kill().split()
-        subprocess.run(cmd)#, stderr=subprocess.DEVNULL)
+        cmd = CommandMaker.kill()
+        subprocess.run(cmd, shell=True)#, stderr=subprocess.DEVNULL)
         # except subprocess.SubprocessError as e:
         #     raise BenchError('Failed to kill testbed', e)
 
