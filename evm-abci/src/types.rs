@@ -11,7 +11,7 @@ use abci::{
 };
 
 use alloy::primitives::{Address, TxKind, U256};
-use alloy::rpc::types::TransactionRequest;
+use alloy::rpc::types::{Transaction, TransactionRequest};
 use alloy::consensus::TxEnvelope;
 use foundry_evm::revm::{
     self,
@@ -51,7 +51,7 @@ pub struct TransactionResult {
 
 #[derive(Debug)]
 enum TxStatus {
-    Signed(TxEnvelope),
+    Signed(Transaction),
     Unsigned(TransactionRequest),
 }
 
@@ -82,8 +82,8 @@ where
             // Configure transaction environment
             evm.context.evm.env.tx = match tx {
                 TxStatus::Signed(tx) => {
-                    let caller = tx.recover_signer()?;
-                    match tx {
+                    let caller = tx.from;
+                    match tx.inner {
                         TxEnvelope::Legacy(_signed_tx) => {
                             todo!()
                         },
@@ -198,10 +198,10 @@ where
         tracing::trace!("delivering tx");
         let mut state = self.current_state.lock().await;
 
-        let tx: TxEnvelope = match serde_json::from_slice(&deliver_tx_request.tx) {
+        let tx: Transaction = match serde_json::from_slice(&deliver_tx_request.tx) {
             Ok(tx) => tx,
-            Err(_) => {
-                tracing::error!("could not decode request");
+            Err(err) => {
+                tracing::error!("could not decode request: {err}");
                 return ResponseDeliverTx {
                     data: "could not decode request".into(),
                     ..Default::default()
