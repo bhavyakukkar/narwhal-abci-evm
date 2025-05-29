@@ -10,19 +10,16 @@ use abci::{
     types::*,
 };
 
-use alloy::primitives::{Address, Bytes, TxKind, U256};
+use alloy::primitives::{Address, TxKind, U256};
 use alloy::rpc::types::TransactionRequest;
-use foundry_common::ens::NameOrAddress;
+use alloy::consensus::TxEnvelope;
 use foundry_evm::revm::{
     self,
     db::{CacheDB, EmptyDB},
-    primitives::{AccountInfo, CreateScheme, Env, TxEnv},
-    Database, DatabaseCommit,
+    primitives::{Env, ExecutionResult, ResultAndState, TxEnv},
+    Database, DatabaseCommit, EvmBuilder,
 };
-use revm::primitives::{ExecutionResult, Output};
-use revm::EvmBuilder;
 use std::error::Error as StdError;
-use foundry_evm::revm::primitives::ResultAndState;
 
 /// The app's state, containing a Revm DB.
 // TODO: Should we instead try to replace this with Anvil and implement traits for it?
@@ -52,17 +49,27 @@ pub struct TransactionResult {
     pub logs: Vec<revm::primitives::Log>,
 }
 
+#[derive(Debug)]
+enum TxStatus {
+    Signed(TxEnvelope),
+    Unsigned(TransactionRequest),
+}
+
 impl<Db: Database + DatabaseCommit> State<Db>
 where
     Db::Error: StdError + Send + Sync + 'static,
 {
     async fn execute(
         &mut self,
-        tx: TransactionRequest,
-        read_only: bool,
+        tx: TxStatus,
     ) -> eyre::Result<TransactionResult> {
         let result: ResultAndState;
+        let read_only = matches!(tx, TxStatus::Unsigned(_));
+
         {
+            // TODO Validate the transaction if its signed
+
+            
             // Create a new database reference
             let db = &mut self.db;
 
@@ -73,21 +80,67 @@ where
                 .build();
 
             // Configure transaction environment
-            evm.context.evm.env.tx = TxEnv {
-                caller: tx.from.unwrap_or_default(),
-                transact_to: tx.to.unwrap_or_else(|| TxKind::Create),
-                value: tx.value.unwrap_or_default(),
-                data: tx.input.data.clone().unwrap_or_default(),
-                gas_limit: tx.gas.unwrap_or(21000),
-                gas_price: U256::from(tx.gas_price.unwrap_or_default()),
-                gas_priority_fee: Some(U256::from(tx.max_priority_fee_per_gas.unwrap_or_default())),
-                blob_hashes: vec![],
-                max_fee_per_blob_gas: None,
-                authorization_list: None,
-                nonce: Some(tx.nonce.unwrap_or_default()),
-                chain_id: Some(self.env.cfg.chain_id),
-                access_list: vec![],
-                optimism: Default::default(),
+            evm.context.evm.env.tx = match tx {
+                TxStatus::Signed(tx) => {
+                    let caller = tx.recover_signer()?;
+                    match tx {
+                        TxEnvelope::Legacy(_signed_tx) => {
+                            todo!()
+                        },
+                        TxEnvelope::Eip2930(_signed_tx) => {
+                            todo!()
+                        },
+                        TxEnvelope::Eip1559(_signed_tx) => {
+                            todo!()
+                        },
+                        TxEnvelope::Eip4844(_signed_tx) => {
+                            todo!()
+                        },
+                        TxEnvelope::Eip7702(signed_tx) => {
+                            // let actual_tx = signed_tx.tx();
+                            let actual_tx = signed_tx.strip_signature();
+                            TxEnv {
+                                caller,
+                                transact_to: if actual_tx.to.is_zero() {
+                                    TxKind::Create
+                                } else {
+                                    TxKind::Call(actual_tx.to)
+                                },
+                                value: actual_tx.value,
+                                data: actual_tx.input,
+                                gas_limit: actual_tx.gas_limit,
+                                gas_price: actual_tx.max_fee_per_gas.try_into()?,
+                                gas_priority_fee: Some(actual_tx.max_priority_fee_per_gas.try_into()?),
+                                blob_hashes: vec![],
+                                max_fee_per_blob_gas: None,
+                                // TODO due to two versions of `alloy_eip7702`, this is not the expected type
+                                // authorization_list: Some(AuthorizationList::Signed(actual_tx.authorization_list)),
+                                authorization_list: None,
+                                nonce: Some(actual_tx.nonce),
+                                chain_id: Some(self.env.cfg.chain_id),
+                                access_list: actual_tx.access_list.0,
+                                optimism: Default::default(),
+                            }
+                        },
+                        _ => todo!(),
+                    }
+                },
+                TxStatus::Unsigned(tx) => TxEnv {
+                    caller: tx.from.unwrap_or_default(),
+                    transact_to: tx.to.unwrap_or_else(|| TxKind::Create),
+                    value: tx.value.unwrap_or_default(),
+                    data: tx.input.data.clone().unwrap_or_default(),
+                    gas_limit: tx.gas.unwrap_or(21000),
+                    gas_price: U256::from(tx.gas_price.unwrap_or_default()),
+                    gas_priority_fee: Some(U256::from(tx.max_priority_fee_per_gas.unwrap_or_default())),
+                    blob_hashes: vec![],
+                    max_fee_per_blob_gas: None,
+                    authorization_list: None,
+                    nonce: Some(tx.nonce.unwrap_or_default()),
+                    chain_id: Some(self.env.cfg.chain_id),
+                    access_list: vec![],
+                    optimism: Default::default(),
+                },
             };
 
             // Execute transaction
@@ -145,7 +198,7 @@ where
         tracing::trace!("delivering tx");
         let mut state = self.current_state.lock().await;
 
-        let tx: TransactionRequest = match serde_json::from_slice(&deliver_tx_request.tx) {
+        let tx: TxEnvelope = match serde_json::from_slice(&deliver_tx_request.tx) {
             Ok(tx) => tx,
             Err(_) => {
                 tracing::error!("could not decode request");
@@ -156,7 +209,7 @@ where
             }
         };
 
-        let result = match state.execute(tx, false).await {
+        let result = match state.execute(TxStatus::Signed(tx)).await {
             Ok(result) => result,
             Err(e) => {
                 tracing::error!("execution failed: {}", e);
@@ -292,7 +345,7 @@ where
                     _ => panic!("not an address"),
                 };
 
-                let result = state.execute(tx, true).await.unwrap();
+                let result = state.execute(TxStatus::Unsigned(tx)).await.unwrap();
                 QueryResponse::Tx(result)
             }
         };
