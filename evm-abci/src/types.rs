@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 
 use abci::{
@@ -10,9 +10,10 @@ use abci::{
     types::*,
 };
 
-use alloy::primitives::{Address, TxKind, U256};
-use alloy::rpc::types::{Transaction, TransactionRequest};
 use alloy::consensus::TxEnvelope;
+use alloy::network::TransactionResponse as _;
+use alloy::primitives::{Address, FixedBytes, TxKind, U256};
+use alloy::rpc::types::{Transaction, TransactionRequest};
 use foundry_evm::revm::{
     self,
     db::{CacheDB, EmptyDB},
@@ -20,6 +21,8 @@ use foundry_evm::revm::{
     Database, DatabaseCommit, EvmBuilder,
 };
 use std::error::Error as StdError;
+
+type TxHash = FixedBytes<32>;
 
 /// The app's state, containing a Revm DB.
 // TODO: Should we instead try to replace this with Anvil and implement traits for it?
@@ -29,6 +32,7 @@ pub struct State<Db> {
     pub app_hash: Vec<u8>,
     pub db: Db,
     pub env: Env,
+    pub receipts: HashMap<TxHash, ExecutionResult>,
 }
 
 impl Default for State<CacheDB<EmptyDB>> {
@@ -38,6 +42,7 @@ impl Default for State<CacheDB<EmptyDB>> {
             app_hash: Vec::new(),
             db: CacheDB::new(EmptyDB::default()),
             env: Default::default(),
+            receipts: HashMap::new(),
         }
     }
 }
@@ -59,17 +64,16 @@ impl<Db: Database + DatabaseCommit> State<Db>
 where
     Db::Error: StdError + Send + Sync + 'static,
 {
-    async fn execute(
-        &mut self,
-        tx: TxStatus,
-    ) -> eyre::Result<TransactionResult> {
+    async fn execute(&mut self, tx: TxStatus) -> eyre::Result<TransactionResult> {
         let result: ResultAndState;
-        let read_only = matches!(tx, TxStatus::Unsigned(_));
+        let tx_hash = match &tx {
+            TxStatus::Signed(tx) => Some(tx.tx_hash()),
+            TxStatus::Unsigned(_) => None,
+        };
 
         {
             // TODO Validate the transaction if its signed
 
-            
             // Create a new database reference
             let db = &mut self.db;
 
@@ -86,16 +90,16 @@ where
                     match tx.inner {
                         TxEnvelope::Legacy(_signed_tx) => {
                             todo!()
-                        },
+                        }
                         TxEnvelope::Eip2930(_signed_tx) => {
                             todo!()
-                        },
+                        }
                         TxEnvelope::Eip1559(_signed_tx) => {
                             todo!()
-                        },
+                        }
                         TxEnvelope::Eip4844(_signed_tx) => {
                             todo!()
-                        },
+                        }
                         TxEnvelope::Eip7702(signed_tx) => {
                             // let actual_tx = signed_tx.tx();
                             let actual_tx = signed_tx.strip_signature();
@@ -110,7 +114,9 @@ where
                                 data: actual_tx.input,
                                 gas_limit: actual_tx.gas_limit,
                                 gas_price: actual_tx.max_fee_per_gas.try_into()?,
-                                gas_priority_fee: Some(actual_tx.max_priority_fee_per_gas.try_into()?),
+                                gas_priority_fee: Some(
+                                    actual_tx.max_priority_fee_per_gas.try_into()?,
+                                ),
                                 blob_hashes: vec![],
                                 max_fee_per_blob_gas: None,
                                 // TODO due to two versions of `alloy_eip7702`, this is not the expected type
@@ -121,10 +127,10 @@ where
                                 access_list: actual_tx.access_list.0,
                                 optimism: Default::default(),
                             }
-                        },
+                        }
                         _ => todo!(),
                     }
-                },
+                }
                 TxStatus::Unsigned(tx) => TxEnv {
                     caller: tx.from.unwrap_or_default(),
                     transact_to: tx.to.unwrap_or_else(|| TxKind::Create),
@@ -132,7 +138,9 @@ where
                     data: tx.input.data.clone().unwrap_or_default(),
                     gas_limit: tx.gas.unwrap_or(21000),
                     gas_price: U256::from(tx.gas_price.unwrap_or_default()),
-                    gas_priority_fee: Some(U256::from(tx.max_priority_fee_per_gas.unwrap_or_default())),
+                    gas_priority_fee: Some(U256::from(
+                        tx.max_priority_fee_per_gas.unwrap_or_default(),
+                    )),
                     blob_hashes: vec![],
                     max_fee_per_blob_gas: None,
                     authorization_list: None,
@@ -147,16 +155,20 @@ where
             result = evm.transact()?;
         }
 
-        // Commit state changes if not read-only
-        if !read_only {
+        // Commit state changes & save transaction if not read-only
+        if let Some(tx_hash) = tx_hash {
+            let result = result.clone();
             self.db.commit(result.state.clone());
+            assert!(
+                self.receipts.insert(tx_hash, result.result).is_none(),
+                "Transaction hashes should be random"
+            );
         }
 
-        let rc = result.clone();
         Ok(TransactionResult {
-            out: rc.result.clone(),
-            gas: rc.result.gas_used(),
-            logs: rc.result.logs().into(),
+            out: result.result.clone(),
+            gas: result.result.gas_used(),
+            logs: result.result.logs().into(),
         })
     }
 }
@@ -271,6 +283,7 @@ pub struct Info<Db> {
 #[allow(clippy::large_enum_variant)]
 pub enum Query {
     EthCall(TransactionRequest),
+    GetTransactionReceipt(TxHash),
     Balance(Address),
 }
 
@@ -278,6 +291,7 @@ pub enum Query {
 #[allow(clippy::large_enum_variant)]
 pub enum QueryResponse {
     Tx(TransactionResult),
+    Receipt(Option<ExecutionResult>),
     Balance(U256),
 }
 
@@ -286,6 +300,13 @@ impl QueryResponse {
         match self {
             QueryResponse::Tx(inner) => inner,
             _ => panic!("not a tx"),
+        }
+    }
+
+    pub fn as_receipt(&self) -> Option<&ExecutionResult> {
+        match self {
+            QueryResponse::Receipt(inner) => inner.as_ref(),
+            _ => panic!("not a receipt"),
         }
     }
 
@@ -339,6 +360,9 @@ where
                     }
                 }
             },
+            Query::GetTransactionReceipt(tx_hash) => {
+                QueryResponse::Receipt(state.receipts.get(&tx_hash).cloned())
+            }
             Query::EthCall(mut tx) => {
                 match tx.to {
                     Some(addr) => tx.to = Some(addr.into()),

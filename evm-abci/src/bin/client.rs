@@ -85,10 +85,7 @@ async fn send_transaction(host: &str, from: Address, to: Address, value: U256) -
         Paint::red(to_name).bold()
     );
 
-    let tx = TransactionRequest::default()
-        .from(from)
-        .to(to)
-        .value(value);
+    let tx = TransactionRequest::default().from(from).to(to).value(value);
 
     let tx = serde_json::to_string(&tx)?;
 

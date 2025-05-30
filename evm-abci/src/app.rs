@@ -1,10 +1,10 @@
 use crate::{Consensus, Info, Mempool, Snapshot, State};
+use foundry_evm::revm::primitives::alloy_primitives::utils::parse_ether;
 use foundry_evm::revm::{
     db::{CacheDB, EmptyDB},
     primitives::AccountInfo,
 };
 use std::sync::Arc;
-use foundry_evm::revm::primitives::alloy_primitives::utils::parse_ether;
 use tokio::sync::Mutex;
 
 pub struct App<Db> {
@@ -22,13 +22,7 @@ impl Default for App<CacheDB<EmptyDB>> {
 
 impl App<CacheDB<EmptyDB>> {
     pub fn new(demo: bool) -> Self {
-        let mut state = State {
-            db: CacheDB::new(EmptyDB::default()),
-            block_height: Default::default(),
-            app_hash: Default::default(),
-            env: Default::default(),
-        };
-
+        let mut state = State::default();
         if demo {
             // addr(pk = 78aaa1de82137f31ac551fd8e876a6930aadd51b28c25e8c3420100f8e51d5c6)
             state.db.insert_account_info(
