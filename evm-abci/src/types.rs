@@ -17,7 +17,7 @@ use alloy::rpc::types::{Transaction, TransactionRequest};
 use foundry_evm::revm::{
     self,
     db::{CacheDB, EmptyDB},
-    primitives::{Env, ExecutionResult, ResultAndState, TxEnv},
+    primitives::{AccountInfo, Env, ExecutionResult, ResultAndState, TxEnv},
     Database, DatabaseCommit, EvmBuilder,
 };
 use std::error::Error as StdError;
@@ -285,6 +285,7 @@ pub enum Query {
     EthCall(TransactionRequest),
     GetTransactionReceipt(TxHash),
     Balance(Address),
+    GetAccount(Address),
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -293,6 +294,7 @@ pub enum QueryResponse {
     Tx(TransactionResult),
     Receipt(Option<ExecutionResult>),
     Balance(U256),
+    AccountInfo(Option<AccountInfo>),
 }
 
 impl QueryResponse {
@@ -314,6 +316,13 @@ impl QueryResponse {
         match self {
             QueryResponse::Balance(inner) => *inner,
             _ => panic!("not a balance"),
+        }
+    }
+
+    pub fn as_account_info(&self) -> Option<&AccountInfo> {
+        match self {
+            QueryResponse::AccountInfo(inner) => inner.as_ref(),
+            _ => panic!("not an account-info"),
         }
     }
 }
@@ -371,6 +380,17 @@ where
 
                 let result = state.execute(TxStatus::Unsigned(tx)).await.unwrap();
                 QueryResponse::Tx(result)
+            }
+            Query::GetAccount(address) => {
+                QueryResponse::AccountInfo(match state.db.basic(address) {
+                    Ok(opt_info) => opt_info,
+                    Err(_) => {
+                        return ResponseQuery {
+                            value: "database error".into(),
+                            ..Default::default()
+                        }
+                    }
+                })
             }
         };
 
